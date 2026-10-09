@@ -1,6 +1,6 @@
 {
   "name": "@bloq/upgrade-safety",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Check a proxy upgrade against the storage layout actually live on chain, including ERC-7201 namespaces",
   "keywords": [
     "upgrades",

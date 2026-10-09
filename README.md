@@ -19,7 +19,9 @@ ERC-7201 handling (see [Slot consistency](#slot-consistency)).
 2. Recompile each input hardhat-deploy saved in `deployments/<network>/solcInputs`, with the solc version its artifacts
    record (or the project's configured versions), and keep the contract whose deployed bytecode equals the live code,
    immutables masked. Inputs of artifacts that record the live address are tried first; the bytecode match alone
-   decides. If no input matches, the check throws rather than passes.
+   decides. Only the new contract's file and what it imports are compiled from each input (a contract's bytecode,
+   metadata hash included, normally depends on nothing else); whole inputs are tried only if that finds no match, for
+   a live contract in another file or any case where the reduced compile differs. If no input matches, the check throws rather than passes.
 3. Compare the new implementation with it using OpenZeppelin's checks: upgrade safety (`assertUpgradeSafe`) and the
    storage upgrade report, including ERC-7201 namespaces.
 
@@ -56,7 +58,7 @@ evaluated, so its namespace is reported unsafe rather than assumed consistent.
 Not on npm: install a release tag from git. Each tag carries the built `dist`, so nothing is built on install.
 
 ```json
-"@bloq/upgrade-safety": "github:bloq/upgrade-safety#v0.1.0"
+"@bloq/upgrade-safety": "github:bloq/upgrade-safety#v0.1.1"
 ```
 
 Needs Node 22+, and as peers `hardhat` 2.26+ and `@openzeppelin/upgrades-core` 1.44.2+.
@@ -101,8 +103,10 @@ if (!result.ok) console.log(result.report);
 `checkUpgradeSafety` throws when the live source cannot be found (no saved input compiles to the live code) or the new
 contract has no build info. `assertUpgradeSafety` also throws when the upgrade is unsafe.
 
-Compiles are cached per process, so a run over many proxies on one implementation compiles it once. A miss still costs
-a full compile per saved input, which is slow on large viaIR projects.
+Compiles are cached per process, so a run over many proxies on one implementation compiles it once. hardhat-deploy saves
+the whole project in every input; compiling only the import closure is what keeps a check fast (on a real project, 8
+proxies went from about 7 minutes to 31 seconds). An input with remappings, or an import that doesn't resolve, is
+compiled whole.
 
 ## Development
 

@@ -21,6 +21,7 @@ import {
   type ValidationOptions,
   type ValidationRunData,
 } from "@openzeppelin/upgrades-core";
+import { importClosure } from "./closure.js";
 import {
   describeNamespace,
   isConsistent,
@@ -195,6 +196,7 @@ interface LiveImplementation {
   implementation: string;
   compilation: Compilation;
   fullyQualifiedName: string;
+  solcInputHash: string;
 }
 
 // Proxies share implementations, so resolve each once
@@ -205,7 +207,12 @@ const liveImplementations = new Map<string, Promise<LiveImplementation>>();
  * hardhat-deploy recorded for the network and matching the result against the live bytecode. Matching on bytecode
  * (rather than trusting artifact names) guarantees the storage layout we compare against is the one actually live.
  */
-const findLiveImplementation = async (hre: HardhatRuntimeEnvironment, proxy: string, deploymentsNetwork: string) => {
+const findLiveImplementation = async (
+  hre: HardhatRuntimeEnvironment,
+  proxy: string,
+  deploymentsNetwork: string,
+  root: string,
+) => {
   const slot = (await hre.network.provider.request({
     method: "eth_getStorageAt",
     params: [proxy, IMPLEMENTATION_SLOT, "latest"],
@@ -214,7 +221,8 @@ const findLiveImplementation = async (hre: HardhatRuntimeEnvironment, proxy: str
   const key = `${deploymentsNetwork}:${implementation}`;
   let live = liveImplementations.get(key);
   if (!live) {
-    live = resolveSource(hre, implementation, path.join(hre.config.paths.root, "deployments", deploymentsNetwork));
+    const deploymentsDir = path.join(hre.config.paths.root, "deployments", deploymentsNetwork);
+    live = resolveSource(hre, implementation, deploymentsDir, root);
     liveImplementations.set(key, live);
   }
   return live;
@@ -224,6 +232,7 @@ const resolveSource = async (
   hre: HardhatRuntimeEnvironment,
   implementation: string,
   deploymentsDir: string,
+  root: string,
 ): Promise<LiveImplementation> => {
   const code = (await hre.network.provider.request({
     method: "eth_getCode",
@@ -233,23 +242,32 @@ const resolveSource = async (
   if (!liveCode.length) throw new Error(`No code at live implementation ${implementation}`);
 
   const compileErrors: string[] = [];
-  for (const { id, file, solcVersions } of candidates(hre, deploymentsDir, implementation)) {
-    const input = readJson(file) as SolcInput;
-    for (const solcVersion of solcVersions) {
-      let compilation: Compilation;
-      try {
-        compilation = await compile(hre, input, solcVersion, id);
-      } catch (error) {
-        // Expected for a wrong compiler (pragma mismatch), but keep the error in case it was the right one
-        compileErrors.push(`${id} with solc ${solcVersion}: ${(error as Error).message}`);
-        continue;
-      }
-      for (const [sourceName, contracts] of Object.entries(compilation.output.contracts)) {
-        for (const [contractName, contract] of Object.entries(contracts)) {
-          const deployed = (contract.evm as SolcEvmWithDeployedBytecode).deployedBytecode;
-          if (!deployed?.object || deployed.object.length !== liveCode.length) continue;
-          if (maskImmutables(liveCode, deployed.immutableReferences) === deployed.object.toLowerCase()) {
-            return { implementation, compilation, fullyQualifiedName: `${sourceName}:${contractName}` };
+  const saved = candidates(hre, deploymentsDir, implementation);
+  // First only `root` and its imports from each input that has it; then whole inputs, for a live contract that lives
+  // in another file (e.g. under an older name)
+  for (const pruned of [true, false]) {
+    for (const { id, file, solcVersions } of saved) {
+      const full = readJson(file) as SolcInput;
+      const input = pruned ? importClosure(full, root) : full;
+      if (!input) continue;
+      for (const solcVersion of solcVersions) {
+        let compilation: Compilation;
+        try {
+          compilation = await compile(hre, input, solcVersion, pruned ? `${id}#${root}` : id);
+        } catch (error) {
+          // Expected for a wrong compiler (pragma mismatch), but keep the error in case it was the right one. A pruned
+          // compile can also fail for an import the scan missed; the whole input is tried next, so only its error counts
+          if (!pruned) compileErrors.push(`${id} with solc ${solcVersion}: ${(error as Error).message}`);
+          continue;
+        }
+        for (const [sourceName, contracts] of Object.entries(compilation.output.contracts)) {
+          for (const [contractName, contract] of Object.entries(contracts)) {
+            const deployed = (contract.evm as SolcEvmWithDeployedBytecode).deployedBytecode;
+            if (!deployed?.object || deployed.object.length !== liveCode.length) continue;
+            if (maskImmutables(liveCode, deployed.immutableReferences) === deployed.object.toLowerCase()) {
+              const fullyQualifiedName = `${sourceName}:${contractName}`;
+              return { implementation, compilation, fullyQualifiedName, solcInputHash: id };
+            }
           }
         }
       }
@@ -276,15 +294,21 @@ export const checkUpgradeSafety = async (
 ): Promise<UpgradeSafetyResult> => {
   const opts = withValidationDefaults(unsafeAllow ? { kind, unsafeAllow } : { kind });
 
-  const live = await findLiveImplementation(hre, proxy, deploymentsNetwork);
   const { sourceName, contractName } = await hre.artifacts.readArtifact(contract);
+  const live = await findLiveImplementation(hre, proxy, deploymentsNetwork, sourceName);
   const newFullyQualifiedName = `${sourceName}:${contractName}`;
   const buildInfo = await hre.artifacts.getBuildInfo(newFullyQualifiedName);
   if (!buildInfo) throw new Error(`No build info for ${newFullyQualifiedName}; compile first`);
-  const updatedCompilation = await compile(hre, buildInfo.input, buildInfo.solcVersion, buildInfo.id);
+  const { input: fullInput, solcVersion, id } = buildInfo;
+  const prunedInput = importClosure(fullInput, sourceName);
+  const updatedCompilation = await (prunedInput
+    ? compile(hre, prunedInput, solcVersion, `${id}#${sourceName}`).catch(() =>
+        compile(hre, fullInput, solcVersion, id),
+      )
+    : compile(hre, fullInput, solcVersion, id));
   const updated = await validateCompilation(hre, updatedCompilation);
 
-  const reference = `${live.fullyQualifiedName} @ ${live.compilation.id}`;
+  const reference = `${live.fullyQualifiedName} @ ${live.solcInputHash}`;
   const problems: string[] = [];
   const notes: string[] = [];
 

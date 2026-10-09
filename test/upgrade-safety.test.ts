@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { checkUpgradeSafety, erc7201, type UpgradeSafetyResult } from "../src/index.js";
+import { importClosure } from "../src/closure.js";
 import { renameAnnotations } from "../src/namespaces.js";
 import {
   BOX,
   boxInput,
+  DECOY,
   decoyInput,
   deployedCode,
   edit,
@@ -99,6 +101,76 @@ describe("live source", () => {
     });
     // The live input is cached and tried first, so no decoy compiles (the updated input is cached as well)
     expect(solcCalls.count - before).toBe(0);
+  });
+});
+
+// Fails to compile, so a compile that includes it can't succeed
+const BROKEN =
+  "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\ncontract Broken {\n    uint256 public value\n}\n";
+
+describe("import closure", () => {
+  const withSources = (extra: Record<string, string>) => {
+    const input = boxInput();
+    return {
+      ...input,
+      sources: {
+        ...input.sources,
+        ...Object.fromEntries(Object.entries(extra).map(([k, content]) => [k, { content }])),
+      },
+    };
+  };
+
+  it("keeps the root and what it imports, transitively, and nothing else", () => {
+    const pruned = importClosure(withSources({ "Unrelated.sol": DECOY, "Broken.sol": BROKEN }), "Box.sol");
+    expect(Object.keys(pruned?.sources ?? {}).sort()).toEqual(["Box.sol", "Stoppable.sol"]);
+  });
+
+  it("follows relative, multi-line and aliased imports", () => {
+    const pruned = importClosure(
+      withSources({
+        "lib/A.sol": 'import {\n  B\n} from "../lib/sub/B.sol";\nimport * as C from "./C.sol";\ncontract A {}',
+        "lib/sub/B.sol": 'import "../D.sol" as D;\ncontract B {}',
+        "lib/C.sol": "contract C {}",
+        "lib/D.sol": "contract D {}",
+        "lib/E.sol": "contract E {}",
+      }),
+      "lib/A.sol",
+    );
+    expect(Object.keys(pruned?.sources ?? {}).sort()).toEqual(["lib/A.sol", "lib/C.sol", "lib/D.sol", "lib/sub/B.sol"]);
+  });
+
+  it("gives up (full input) when the root is absent, an import does not resolve, or remappings are set", () => {
+    expect(importClosure(boxInput(), "Missing.sol")).toBeUndefined();
+    expect(
+      importClosure(withSources({ "Box.sol": edit(BOX, "./Stoppable.sol", "./Gone.sol") }), "Box.sol"),
+    ).toBeUndefined();
+    const remapped = boxInput();
+    expect(
+      importClosure(
+        { ...remapped, settings: { ...remapped.settings, remappings: ["a/=b/"] } } as typeof remapped,
+        "Box.sol",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("compiles only the closure: an unrelated file that does not compile is ignored, and the bytecode still matches", async () => {
+    // The live code comes from the clean input, so a match also shows the pruned compile is byte-identical
+    const noisy = withSources({ "Broken.sol": BROKEN });
+    const result = await check(noisy, { saved: [{ input: noisy, solcVersion: SOLC_VERSION }] });
+    expect(result.report).toBe("");
+    expect(result.ok).toBe(true);
+    expect(result.reference).toMatch(/^Box\.sol:Box @ /);
+  });
+
+  it("falls back to whole inputs for a live contract in a file the new code does not have", async () => {
+    const old = { ...boxInput(), sources: { "OldBox.sol": { content: BOX }, "Stoppable.sol": { content: STOPPABLE } } };
+    const result = await check(boxInput(), {
+      saved: [{ input: old, solcVersion: SOLC_VERSION }],
+      code: deployedCode(old, "OldBox.sol"),
+    });
+    expect(result.report).toBe("");
+    expect(result.ok).toBe(true);
+    expect(result.reference).toMatch(/^OldBox\.sol:Box @ /);
   });
 });
 

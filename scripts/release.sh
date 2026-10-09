@@ -1,6 +1,6 @@
 #!/bin/sh
 # Tags a release whose commit carries the built dist, so consumers install from git without building it:
-#   "@bloq/upgrade-safety": "github:bloq/upgrade-safety#v0.1.0"
+#   "@bloq/upgrade-safety": "github:bloq/upgrade-safety#v0.1.1"
 # The release commit sits on top of HEAD on no branch, so main keeps source only. Pushing the tag is left to you.
 set -eu
 

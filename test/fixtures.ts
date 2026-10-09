@@ -114,13 +114,13 @@ const solcjs = (input: SolcInput): SolcOutput => {
 };
 
 /** Runtime code of Box compiled from `input`, immutables filled as a real deployment at IMPLEMENTATION would. */
-export const deployedCode = (input: SolcInput): string => {
+export const deployedCode = (input: SolcInput, sourceName = "Box.sol"): string => {
   const output = solcjs({
     ...input,
     settings: { ...settings, outputSelection: { "*": { "*": ["evm.deployedBytecode"] } } },
   });
   const { object, immutableReferences } = (
-    output.contracts["Box.sol"]?.["Box"]?.evm as unknown as {
+    output.contracts[sourceName]?.["Box"]?.evm as unknown as {
       deployedBytecode: { object: string; immutableReferences: Record<string, { start: number; length: number }[]> };
     }
   ).deployedBytecode;
